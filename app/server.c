@@ -232,13 +232,14 @@ int main() {
 	}
 	
 	// concurrent request handle
-
-	fd_set active_fd_set, read_fd_set;
-    FD_ZERO(&active_fd_set);
-    FD_SET(server_fd, &active_fd_set);
+	fd_set active_fd_set, read_fd_set; // active_fd_set으로 관리하고, select 함수로 넘기는 건 read만.
+    FD_ZERO(&active_fd_set); //  모든 비트를 0으로 초기화합니다
+    FD_SET(server_fd, &active_fd_set); // server socket fd 추가
 
 	while (1)
 	{
+		// select()가 발생한 파일 디스크립터만 남기도록 read_fd_set을 수정하기 때문에, 
+		// 원본 active_fd_set을 보존하고 매 iter 마다 read_fd_set에 붙여줘야 함.
 		read_fd_set = active_fd_set;
 
 		if (select(FD_SETSIZE, &read_fd_set, NULL, NULL, NULL) < 0) {
@@ -266,7 +267,9 @@ int main() {
                     printf("New client connected: %d\n", conn_sock_fd);
 
                 } else {
-                    handle_client(i);
+                    handle_client(i); // 현재 요구 사항은 한 번만 응답 보내고 끊으면 됨.
+
+					// fd_set에서 제거
                     FD_CLR(i, &active_fd_set);
                 }
             }
