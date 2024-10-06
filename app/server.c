@@ -8,7 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
-char* extract_url(const char* request) {
+char* extract_path(const char* request) {
 	char* path_start = strchr(request, ' ');
 	if (path_start == NULL) {
 		return NULL;
@@ -17,21 +17,41 @@ char* extract_url(const char* request) {
 
 	char* path_end = strchr(path_start, ' ');
     if (path_end == NULL) {
-        return NULL;  // 잘못된 형식의 요청
+        return NULL;
     }
 
 	int path_length = path_end - path_start;
 
-	// free는 함수 바깥에서.
+	// free는 함수 바깥에서 시행 됨.
 	char* path = (char*)malloc(path_length + 1);
     if (path == NULL) {
-        return NULL;  // 메모리 할당 실패
+        return NULL;
     }
 
     strncpy(path, path_start, path_length);
     path[path_length] = '\0';  // 문자열 종료
 
 	return path;
+}
+
+char* is_echo_req(const char* path) {
+	/*
+		[examples]
+		/echo/abcd
+	*/
+	const char* echo_prefix = "/echo/";
+    char* echo_start = strstr(path, echo_prefix); // prefix로 시작하는 위치
+
+	// /echo/로 시작하니?
+	if (echo_start == path) {
+		// 그렇다면 /echo/ 이후의 문자열을 가져와
+        char* echo_str = echo_start + strlen(echo_prefix);
+        if (*echo_str != '\0') {
+            return echo_str;
+        }
+    }
+
+    return NULL;
 }
 
 int main() {
@@ -117,28 +137,44 @@ int main() {
 	char recvBuf[1024] = {0,};
 	recv(conn_sock_fd, recvBuf, sizeof(recvBuf), 0);
 
-	char* path = extract_url(recvBuf);
-	printf("[DEBUG] whole url : %s | got path : %s ", recvBuf, path);
-
-	if (!strcmp(path, "") || !strcmp(path, "/") ) { // 같다면
-		char* res = "HTTP/1.1 200 OK\r\n\r\n";
-		send(conn_sock_fd, res, strlen(res), 0);
-		
-		close(server_fd);
-		free(path);
-	} else {
-		char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
-		send(conn_sock_fd, res, strlen(res), 0);
-		
-		close(server_fd);
-		free(path);
+	char* path = extract_path(recvBuf);
+	if (path == NULL) {
+		goto err;
 	}
 
+	printf("[DEBUG] whole url : %s | got path : %s ", recvBuf, path);
+
+	char* echo_str = is_echo_req(path);
 	
+	if (echo_str != NULL) {
+		printf("[DEBUG] echo str is : %s", echo_str);
+	}
 
+	if (path[0] == '\0' || !strncmp(path, "/", sizeof("/")) ) { // 빈문자거나 / 가 온다면
+		char* res = "HTTP/1.1 200 OK\r\n\r\n";
+		send(conn_sock_fd, res, strlen(res), 0);
+	} else if (echo_str != NULL) {
+		char res[1024] = {0};
+		sprintf(res, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\n\r\n%s", strlen(echo_str), echo_str);
+		send(conn_sock_fd, res, strlen(res), 0);
+	}
+	else {
+		char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
+		send(conn_sock_fd, res, strlen(res), 0);
+	}
 
-
-
+	close(conn_sock_fd);
+	close(server_fd);
+	free(path);
 	return 0;
+
+err:
+	if (path != NULL) {
+		free(path);
+	}
+	close(conn_sock_fd);
+	close(server_fd);
+	return -1;
 }
+
 
