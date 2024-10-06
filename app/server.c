@@ -8,6 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <sys/select.h>
 
 char* extract_path(const char* request) {
 	char* path_start = strchr(request, ' ');
@@ -107,6 +108,90 @@ char* parse_user_agent_req(const char* req) {
 	return NULL;
 }
 
+/*
+	[http response]
+	// Status line
+	HTTP/1.1  // HTTP version
+	200       // Status code
+	OK        // Optional reason phrase
+	\r\n      // CRLF that marks the end of the status line
+
+	// Headers (empty)
+	\r\n      // CRLF that marks the end of the headers
+
+	// Response body (empty)
+
+	------------------------------------------------------
+
+	[http request]
+	// Request line
+	GET                          // HTTP method
+	/index.html                  // Request target
+	HTTP/1.1                     // HTTP version
+	\r\n                         // CRLF that marks the end of the request line
+
+	// Headers (각각의 헤더마다 \r\n을 넣어줘야함)
+	Host: localhost:4221\r\n     // Header that specifies the server's host and port
+	User-Agent: curl/7.64.1\r\n  // Header that describes the client's user agent
+	Accept: *//*\r\n              // Header that specifies which media types the client can accept
+	\r\n                         // CRLF that marks the end of the headers
+
+	// Request body (empty)
+*/
+void handle_client(int conn_sock_fd) {
+	char recvBuf[1024] = {0,};
+	recv(conn_sock_fd, recvBuf, sizeof(recvBuf), 0);
+
+	// path 발라내기
+	char* path = extract_path(recvBuf);
+	if (path != NULL) {
+		printf("[DEBUG] whole url : %s | got path : %s ", recvBuf, path);
+	}
+
+	// path가 특정 조건에 만족하는지 체크
+	char* echo_str = parse_echo_req(path);
+	char* ua_value = parse_user_agent_req(recvBuf);
+
+	// path의 특성에 따라 각자 다른 방법으로 응답 보내기
+	if (path[0] == '\0' || !strncmp(path, "/", sizeof("/")) ) { // 빈문자거나 / 가 온다면
+		char* res = "HTTP/1.1 200 OK\r\n\r\n";
+		send(conn_sock_fd, res, strlen(res), 0);
+	} else if (echo_str != NULL) {
+		char res[1024] = {0};
+		sprintf(res, 
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: text/plain\r\n"
+		"Content-Length: %zu\r\n"
+		"\r\n"
+		"%s", strlen(echo_str), echo_str);
+		send(conn_sock_fd, res, strlen(res), 0);
+	} else if (ua_value != NULL) {
+		char res[1024] = {0};
+		printf("[DEBUG] %s \n", ua_value);
+		sprintf(res, 
+			"HTTP/1.1 200 OK\r\n"   // Skip the request line
+			"Content-Type: text/plain\r\n" // header
+			"Content-Length: %zu\r\n"
+			"\r\n"						   // end header
+			"%s", 						// body
+			strlen(ua_value), ua_value);
+		send(conn_sock_fd, res, strlen(res), 0);
+	}
+	else {
+		char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
+		send(conn_sock_fd, res, strlen(res), 0);
+	}
+
+	// clean up
+	if (path != NULL) {
+		free(path);
+	}
+	if (ua_value != NULL) {
+		free(ua_value);
+	}
+	close(conn_sock_fd);
+}
+
 int main() {
 	// Disable output buffering
 	setbuf(stdout, NULL);
@@ -146,112 +231,50 @@ int main() {
 		return 1;
 	}
 	
+	// concurrent request handle
+
+	fd_set active_fd_set, read_fd_set;
+    FD_ZERO(&active_fd_set);
+    FD_SET(server_fd, &active_fd_set);
+
+	while (1)
+	{
+		read_fd_set = active_fd_set;
+
+		if (select(FD_SETSIZE, &read_fd_set, NULL, NULL, NULL) < 0) {
+            perror("select");
+            exit(1);
+        }
+
+		for (int i = 0; i < FD_SETSIZE; ++i) {
+
+			// readable 한 상태의 fd
+            if (FD_ISSET(i, &read_fd_set)) {
+				
+				// 서버의 경우 accept한 후 fd_set에 등록
+                if (i == server_fd) {
+
+					struct sockaddr_in client_addr;
+					int client_addr_len;
+					client_addr_len = sizeof(client_addr);
+                    int conn_sock_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *)&client_addr_len);
+                    if (conn_sock_fd < 0) {
+                        perror("accept");
+                        continue;
+                    }
+                    FD_SET(conn_sock_fd, &active_fd_set);
+                    printf("New client connected: %d\n", conn_sock_fd);
+
+                } else {
+                    handle_client(i);
+                    FD_CLR(i, &active_fd_set);
+                }
+            }
+        }
+	}
 	
-	struct sockaddr_in client_addr;
-	int client_addr_len;
-	client_addr_len = sizeof(client_addr);
-	int conn_sock_fd;
-	
-	printf("Waiting for a client to connect...\n");
-	conn_sock_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *)&client_addr_len);
-	printf("Client connected\n");
-
-	/*
-	[http response]
-	// Status line
-	HTTP/1.1  // HTTP version
-	200       // Status code
-	OK        // Optional reason phrase
-	\r\n      // CRLF that marks the end of the status line
-
-	// Headers (empty)
-	\r\n      // CRLF that marks the end of the headers
-
-	// Response body (empty)
-
-	------------------------------------------------------
-
-	[http request]
-	// Request line
-	GET                          // HTTP method
-	/index.html                  // Request target
-	HTTP/1.1                     // HTTP version
-	\r\n                         // CRLF that marks the end of the request line
-
-	// Headers (각각의 헤더마다 \r\n을 넣어줘야함)
-	Host: localhost:4221\r\n     // Header that specifies the server's host and port
-	User-Agent: curl/7.64.1\r\n  // Header that describes the client's user agent
-	Accept: *//*\r\n              // Header that specifies which media types the client can accept
-	\r\n                         // CRLF that marks the end of the headers
-
-	// Request body (empty)
-	*/
-
-	char recvBuf[1024] = {0,};
-	recv(conn_sock_fd, recvBuf, sizeof(recvBuf), 0);
-
-	// path 발라내기
-	char* path = extract_path(recvBuf);
-	if (path == NULL) {
-		goto err;
-	}
-
-	printf("[DEBUG] whole url : %s | got path : %s ", recvBuf, path);
-
-	// path가 특정 조건에 만족하는지 체크
-	char* echo_str = parse_echo_req(path);
-	if (echo_str != NULL) {
-		printf("[DEBUG] echo str is : %s", echo_str);
-	}
-
-	char* ua_value = parse_user_agent_req(recvBuf);
-
-	// path의 특성에 따라 각자 다른 방법으로 응답 보내기
-	if (path[0] == '\0' || !strncmp(path, "/", sizeof("/")) ) { // 빈문자거나 / 가 온다면
-		char* res = "HTTP/1.1 200 OK\r\n\r\n";
-		send(conn_sock_fd, res, strlen(res), 0);
-	} else if (echo_str != NULL) {
-		char res[1024] = {0};
-		sprintf(res, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\n\r\n%s", strlen(echo_str), echo_str);
-		send(conn_sock_fd, res, strlen(res), 0);
-	} else if (ua_value != NULL) {
-		char res[1024] = {0};
-		printf("[DEBUG] %s \n", ua_value);
-		sprintf(res, 
-			"HTTP/1.1 200 OK\r\n"   // Skip the request line
-			"Content-Type: text/plain\r\n" // header
-			"Content-Length: %zu\r\n"
-			"\r\n"						   // end header
-			"%s", 						// body
-			strlen(ua_value), ua_value);
-		send(conn_sock_fd, res, strlen(res), 0);
-	}
-	else {
-		char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
-		send(conn_sock_fd, res, strlen(res), 0);
-	}
-
-
-	close(conn_sock_fd);
 	close(server_fd);
-	if (path != NULL) {
-		free(path);
-	}
-	if (ua_value != NULL) {
-		free(ua_value);
-	}
 	return 0;
-
-err:
-	if (path != NULL) {
-		free(path);
-	}
-	if (ua_value != NULL) {
-		free(ua_value);
-	}
-	close(conn_sock_fd);
-	close(server_fd);
-	return -1;
 }
 
 
