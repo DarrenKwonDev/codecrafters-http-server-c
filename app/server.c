@@ -12,9 +12,9 @@ int main() {
 	setbuf(stdout, NULL);
  	setbuf(stderr, NULL);
 
-	int server_fd, client_addr_len;
-	struct sockaddr_in client_addr;
+	int server_fd;
 	
+	// tcp 소켓을 만듭니다.
 	server_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (server_fd == -1) {
 		printf("Socket creation failed: %s...\n", strerror(errno));
@@ -29,10 +29,11 @@ int main() {
 		return 1;
 	}
 	
-	struct sockaddr_in serv_addr = { .sin_family = AF_INET ,
-									 .sin_port = htons(4221),
-									 .sin_addr = { htonl(INADDR_ANY) },
-									};
+	struct sockaddr_in serv_addr = { 
+		.sin_family = AF_INET ,
+		.sin_port = htons(4221),
+		.sin_addr = { htonl(INADDR_ANY) },
+	};
 	
 	if (bind(server_fd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) != 0) {
 		printf("Bind failed: %s \n", strerror(errno));
@@ -45,11 +46,31 @@ int main() {
 		return 1;
 	}
 	
-	printf("Waiting for a client to connect...\n");
-	client_addr_len = sizeof(client_addr);
 	
-	accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+	struct sockaddr_in client_addr;
+	int client_addr_len;
+	client_addr_len = sizeof(client_addr);
+	int conn_sock_fd;
+	
+	printf("Waiting for a client to connect...\n");
+	conn_sock_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *)&client_addr_len);
 	printf("Client connected\n");
+
+	/*
+	[http response]
+	// Status line
+	HTTP/1.1  // HTTP version
+	200       // Status code
+	OK        // Optional reason phrase
+	\r\n      // CRLF that marks the end of the status line
+
+	// Headers (empty)
+	\r\n      // CRLF that marks the end of the headers
+
+	// Response body (empty)
+	*/
+	char* res = "HTTP/1.1 200 OK\r\n\r\n";
+	send(conn_sock_fd, res, strlen(res), 0);
 	
 	close(server_fd);
 
