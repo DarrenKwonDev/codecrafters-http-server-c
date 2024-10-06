@@ -5,7 +5,34 @@
 #include <netinet/ip.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
+
+char* extract_url(const char* request) {
+	char* path_start = strchr(request, ' ');
+	if (path_start == NULL) {
+		return NULL;
+	}
+	path_start++;  // 공백 다음 문자로 이동
+
+	char* path_end = strchr(path_start, ' ');
+    if (path_end == NULL) {
+        return NULL;  // 잘못된 형식의 요청
+    }
+
+	int path_length = path_end - path_start;
+
+	// free는 함수 바깥에서.
+	char* path = (char*)malloc(path_length + 1);
+    if (path == NULL) {
+        return NULL;  // 메모리 할당 실패
+    }
+
+    strncpy(path, path_start, path_length);
+    path[path_length] = '\0';  // 문자열 종료
+
+	return path;
+}
 
 int main() {
 	// Disable output buffering
@@ -68,11 +95,50 @@ int main() {
 	\r\n      // CRLF that marks the end of the headers
 
 	// Response body (empty)
+
+	------------------------------------------------------
+
+	[http request]
+	// Request line
+	GET                          // HTTP method
+	/index.html                  // Request target
+	HTTP/1.1                     // HTTP version
+	\r\n                         // CRLF that marks the end of the request line
+
+	// Headers (각각의 헤더마다 \r\n을 넣어줘야함)
+	Host: localhost:4221\r\n     // Header that specifies the server's host and port
+	User-Agent: curl/7.64.1\r\n  // Header that describes the client's user agent
+	Accept: *//*\r\n              // Header that specifies which media types the client can accept
+	\r\n                         // CRLF that marks the end of the headers
+
+	// Request body (empty)
 	*/
-	char* res = "HTTP/1.1 200 OK\r\n\r\n";
-	send(conn_sock_fd, res, strlen(res), 0);
+
+	char recvBuf[1024] = {0,};
+	recv(conn_sock_fd, recvBuf, sizeof(recvBuf), 0);
+
+	char* path = extract_url(recvBuf);
+	printf("[DEBUG] whole url : %s | got path : %s ", recvBuf, path);
+
+	if (!strcmp(path, "") || !strcmp(path, "/") ) { // 같다면
+		char* res = "HTTP/1.1 200 OK\r\n\r\n";
+		send(conn_sock_fd, res, strlen(res), 0);
+		
+		close(server_fd);
+		free(path);
+	} else {
+		char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
+		send(conn_sock_fd, res, strlen(res), 0);
+		
+		close(server_fd);
+		free(path);
+	}
+
 	
-	close(server_fd);
+
+
+
 
 	return 0;
 }
+
