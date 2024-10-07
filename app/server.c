@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <sys/select.h>
 
+static char* file_dir;
+
 char* extract_path(const char* request) {
 	char* path_start = strchr(request, ' ');
 	if (path_start == NULL) {
@@ -108,6 +110,28 @@ char* parse_user_agent_req(const char* req) {
 	return NULL;
 }
 
+char* parse_file_req(const char* req) {
+	// /files/foo
+	const char* file_prefix = "/files/";
+    char* file_start = strstr(req, file_prefix);
+    if (file_start == NULL) return NULL;
+    
+    file_start += strlen(file_prefix);
+    char* file_end = strchr(file_start, ' ');
+    
+    if (file_end == NULL) return NULL;
+    
+    int filename_length = file_end - file_start;
+    char* filename = (char*)malloc(filename_length + 1);
+    
+    if (filename == NULL) return NULL;
+    
+    strncpy(filename, file_start, filename_length);
+    filename[filename_length] = '\0';
+    
+    return filename;
+}
+
 /*
 	[http response]
 	// Status line
@@ -151,6 +175,7 @@ void handle_client(int conn_sock_fd) {
 	// path가 특정 조건에 만족하는지 체크
 	char* echo_str = parse_echo_req(path);
 	char* ua_value = parse_user_agent_req(recvBuf);
+	char* filename = parse_file_req(recvBuf);
 
 	// path의 특성에 따라 각자 다른 방법으로 응답 보내기
 	if (path[0] == '\0' || !strncmp(path, "/", sizeof("/")) ) { // 빈문자거나 / 가 온다면
@@ -176,7 +201,38 @@ void handle_client(int conn_sock_fd) {
 			"%s", 						// body
 			strlen(ua_value), ua_value);
 		send(conn_sock_fd, res, strlen(res), 0);
-	}
+	} else if (filename != NULL) {
+        char filepath[1024];
+        snprintf(filepath, sizeof(filepath), "%s/%s", file_dir, filename);
+        
+        FILE* file = fopen(filepath, "rb"); // read byte mode
+        if (file == NULL) {
+            char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
+            send(conn_sock_fd, res, strlen(res), 0);
+        } else {
+			// 파일의 size를 알기 위한 트릭
+            fseek(file, 0, SEEK_END);  // 마지막으로 pos 이동
+			long file_size = ftell(file);			// 길이 알아오고
+            fseek(file, 0, SEEK_SET);	// 다시 처음으로 돌림
+
+            char header[1024];
+            snprintf(header, sizeof(header), 
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/octet-stream\r\n"
+                "Content-Length: %ld\r\n"
+                "\r\n", file_size);
+            send(conn_sock_fd, header, strlen(header), 0);
+
+            char buffer[1024];
+            size_t bytes_read;
+            while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+                send(conn_sock_fd, buffer, bytes_read, 0);
+            }
+            fclose(file);
+        }
+
+        free(filename);
+    }
 	else {
 		char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
 		send(conn_sock_fd, res, strlen(res), 0);
@@ -192,10 +248,16 @@ void handle_client(int conn_sock_fd) {
 	close(conn_sock_fd);
 }
 
-int main() {
+int main(int argc, char** argv) {
 	// Disable output buffering
 	setbuf(stdout, NULL);
  	setbuf(stderr, NULL);
+
+	// dir check
+    if (argc == 3 && !strcmp(argv[1], "--directory")) {
+        file_dir = argv[2];
+        printf("file_dir is %s \n", file_dir);
+    }
 
 	int server_fd;
 	
@@ -230,6 +292,8 @@ int main() {
 		printf("Listen failed: %s \n", strerror(errno));
 		return 1;
 	}
+
+
 	
 	// concurrent request handle
 	fd_set active_fd_set, read_fd_set; // active_fd_set으로 관리하고, select 함수로 넘기는 건 read만.
@@ -268,7 +332,7 @@ int main() {
 
                 } else {
                     handle_client(i); // 현재 요구 사항은 한 번만 응답 보내고 끊으면 됨.
-
+					close(i);
 					// fd_set에서 제거
                     FD_CLR(i, &active_fd_set);
                 }
