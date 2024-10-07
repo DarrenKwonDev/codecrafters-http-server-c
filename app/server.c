@@ -38,6 +38,34 @@ char* extract_path(const char* request) {
 	return path;
 }
 
+char* get_request_body(const char* request, int* body_length) {
+    const char* body_start = strstr(request, "\r\n\r\n");
+    if (body_start == NULL) {
+        *body_length = 0;
+        return NULL;
+    }
+    body_start += 4; // Skip "\r\n\r\n"
+
+    const char* content_length_header = strstr(request, "Content-Length: ");
+    if (content_length_header == NULL) {
+        *body_length = 0;
+        return NULL;
+    }
+    content_length_header += 16; // Skip "Content-Length: "
+    *body_length = atoi(content_length_header);
+
+    char* body = malloc(*body_length + 1);
+    if (body == NULL) {
+        *body_length = 0;
+        return NULL;
+    }
+    memcpy(body, body_start, *body_length);
+    body[*body_length] = '\0';
+
+    return body;
+}
+
+
 char* parse_echo_req(const char* path) {
 	/*
 		[examples]
@@ -132,6 +160,10 @@ char* parse_file_req(const char* req) {
     return filename;
 }
 
+bool is_post_req(const char* req) {
+    return strncmp(req, "POST", 4) == 0;
+}
+
 /*
 	[http response]
 	// Status line
@@ -166,86 +198,127 @@ void handle_client(int conn_sock_fd) {
 	char recvBuf[1024] = {0,};
 	recv(conn_sock_fd, recvBuf, sizeof(recvBuf), 0);
 
-	// path 발라내기
-	char* path = extract_path(recvBuf);
-	if (path != NULL) {
-		printf("[DEBUG] whole url : %s | got path : %s ", recvBuf, path);
-	}
+	if (is_post_req(recvBuf)) {
+		char* filename = parse_file_req(recvBuf);
+		if (filename == NULL) {
+			char* res = "HTTP/1.1 400 Bad Request\r\n\r\n";
+			send(conn_sock_fd, res, strlen(res), 0);
+			return;
+		}
 
-	// path가 특정 조건에 만족하는지 체크
-	char* echo_str = parse_echo_req(path);
-	char* ua_value = parse_user_agent_req(recvBuf);
-	char* filename = parse_file_req(recvBuf);
+		int body_length;
+		char* body = get_request_body(recvBuf, &body_length);
+		if (body == NULL) {
+			char* res = "HTTP/1.1 400 Bad Request\r\n\r\n";
+			send(conn_sock_fd, res, strlen(res), 0);
+			free(filename);
+			return;
+		}
 
-	// path의 특성에 따라 각자 다른 방법으로 응답 보내기
-	if (path[0] == '\0' || !strncmp(path, "/", sizeof("/")) ) { // 빈문자거나 / 가 온다면
-		char* res = "HTTP/1.1 200 OK\r\n\r\n";
-		send(conn_sock_fd, res, strlen(res), 0);
-	} else if (echo_str != NULL) {
-		char res[1024] = {0};
-		sprintf(res, 
-		"HTTP/1.1 200 OK\r\n"
-		"Content-Type: text/plain\r\n"
-		"Content-Length: %zu\r\n"
-		"\r\n"
-		"%s", strlen(echo_str), echo_str);
-		send(conn_sock_fd, res, strlen(res), 0);
-	} else if (ua_value != NULL) {
-		char res[1024] = {0};
-		printf("[DEBUG] %s \n", ua_value);
-		sprintf(res, 
-			"HTTP/1.1 200 OK\r\n"   // Skip the request line
-			"Content-Type: text/plain\r\n" // header
+		char filepath[1024];
+		snprintf(filepath, sizeof(filepath), "%s/%s", file_dir, filename);
+
+		FILE* file = fopen(filepath, "wb");
+		if (file == NULL) {
+			char* res = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+			send(conn_sock_fd, res, strlen(res), 0);
+		} else {
+			fwrite(body, 1, body_length, file);
+			fclose(file);
+
+			char* res = "HTTP/1.1 201 Created\r\n\r\n";
+			send(conn_sock_fd, res, strlen(res), 0);
+		}
+
+		free(filename);
+		free(body);
+
+    } else {
+        // path 발라내기
+		char* path = extract_path(recvBuf);
+		if (path != NULL) {
+			printf("[DEBUG] whole url : %s | got path : %s ", recvBuf, path);
+		}
+
+		// path가 특정 조건에 만족하는지 체크
+		char* echo_str = parse_echo_req(path);
+		char* ua_value = parse_user_agent_req(recvBuf);
+		char* filename = parse_file_req(recvBuf);
+
+		// path의 특성에 따라 각자 다른 방법으로 응답 보내기
+		if (path[0] == '\0' || !strncmp(path, "/", sizeof("/")) ) { // 빈문자거나 / 가 온다면
+			char* res = "HTTP/1.1 200 OK\r\n\r\n";
+			send(conn_sock_fd, res, strlen(res), 0);
+		} else if (echo_str != NULL) {
+			char res[1024] = {0};
+			sprintf(res, 
+			"HTTP/1.1 200 OK\r\n"
+			"Content-Type: text/plain\r\n"
 			"Content-Length: %zu\r\n"
-			"\r\n"						   // end header
-			"%s", 						// body
-			strlen(ua_value), ua_value);
-		send(conn_sock_fd, res, strlen(res), 0);
-	} else if (filename != NULL) {
-        char filepath[1024];
-        snprintf(filepath, sizeof(filepath), "%s/%s", file_dir, filename);
-        
-        FILE* file = fopen(filepath, "rb"); // read byte mode
-        if (file == NULL) {
-            char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
-            send(conn_sock_fd, res, strlen(res), 0);
-        } else {
-			// 파일의 size를 알기 위한 트릭
-            fseek(file, 0, SEEK_END);  // 마지막으로 pos 이동
-			long file_size = ftell(file);			// 길이 알아오고
-            fseek(file, 0, SEEK_SET);	// 다시 처음으로 돌림
+			"\r\n"
+			"%s", strlen(echo_str), echo_str);
+			send(conn_sock_fd, res, strlen(res), 0);
+		} else if (ua_value != NULL) {
+			char res[1024] = {0};
+			printf("[DEBUG] %s \n", ua_value);
+			sprintf(res, 
+				"HTTP/1.1 200 OK\r\n"   // Skip the request line
+				"Content-Type: text/plain\r\n" // header
+				"Content-Length: %zu\r\n"
+				"\r\n"						   // end header
+				"%s", 						// body
+				strlen(ua_value), ua_value);
+			send(conn_sock_fd, res, strlen(res), 0);
+		} else if (filename != NULL) {
+			char filepath[1024];
+			snprintf(filepath, sizeof(filepath), "%s/%s", file_dir, filename);
+			
+			FILE* file = fopen(filepath, "rb"); // read byte mode
+			if (file == NULL) {
+				char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
+				send(conn_sock_fd, res, strlen(res), 0);
+			} else {
+				// 파일의 size를 알기 위한 트릭
+				fseek(file, 0, SEEK_END);  // 마지막으로 pos 이동
+				long file_size = ftell(file);			// 길이 알아오고
+				fseek(file, 0, SEEK_SET);	// 다시 처음으로 돌림
 
-            char header[1024];
-            snprintf(header, sizeof(header), 
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/octet-stream\r\n"
-                "Content-Length: %ld\r\n"
-                "\r\n", file_size);
-            send(conn_sock_fd, header, strlen(header), 0);
+				char header[1024];
+				snprintf(header, sizeof(header), 
+					"HTTP/1.1 200 OK\r\n"
+					"Content-Type: application/octet-stream\r\n"
+					"Content-Length: %ld\r\n"
+					"\r\n", file_size);
+				send(conn_sock_fd, header, strlen(header), 0);
 
-            char buffer[1024];
-            size_t bytes_read;
-            while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-                send(conn_sock_fd, buffer, bytes_read, 0);
-            }
-            fclose(file);
-        }
+				char buffer[1024];
+				size_t bytes_read;
+				while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+					send(conn_sock_fd, buffer, bytes_read, 0);
+				}
+				fclose(file);
+			}
 
-        free(filename);
+			free(filename);
+		}
+		else {
+			char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
+			send(conn_sock_fd, res, strlen(res), 0);
+		}
+
+		// clean up
+		if (path != NULL) {
+			free(path);
+		}
+		if (ua_value != NULL) {
+			free(ua_value);
+		}
+		close(conn_sock_fd);
     }
-	else {
-		char* res = "HTTP/1.1 404 Not Found\r\n\r\n";
-		send(conn_sock_fd, res, strlen(res), 0);
-	}
 
-	// clean up
-	if (path != NULL) {
-		free(path);
-	}
-	if (ua_value != NULL) {
-		free(ua_value);
-	}
-	close(conn_sock_fd);
+
+
+	
 }
 
 int main(int argc, char** argv) {
